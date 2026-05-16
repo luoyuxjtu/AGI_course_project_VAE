@@ -1,0 +1,29 @@
+# Datasets and model outputs — never commit
+data/
+outputs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Model checkpoints
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+venv/
+.venv/
+env/
