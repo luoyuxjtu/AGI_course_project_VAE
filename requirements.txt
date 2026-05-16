@@ -1,8 +1,12 @@
-torch
-torchvision
-numpy
-pyyaml
-matplotlib
-tqdm
-pillow
-torchmetrics
+# Note: torch and torchvision are NOT installed from this file directly.
+# Install them first via conda (see README for the exact command).
+# The versions below are minimum requirements for the remaining packages.
+
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24,<2.0
+pyyaml>=6.0
+matplotlib>=3.7
+tqdm>=4.65
+pillow>=9.5
+torchmetrics>=1.2
