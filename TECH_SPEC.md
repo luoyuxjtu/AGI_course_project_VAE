@@ -34,10 +34,12 @@ To ensure completion within one week, scope is intentionally simplified:
 - **"Unseen" definition uses sample-level hold-out**: Use the dataset's built-in train/val split.
   The validation set represents samples the model has never seen. **Do not** use class-level
   hold-out.
-- **Dataset**: Imagenette (a 10-class subset of ImageNet), loaded via
-  `torchvision.datasets.ImageFolder`. Imagenette naturally provides `train/` and `val/`
-  directories, meeting sample-level unseen requirements.
-- **Image resolution**: Default 64×64 (configurable to 32×32 for speed via config).
+- **Dataset**: COCO 2017, loaded via a custom flat-directory Dataset class (COCO stores
+  images in flat directories without class subdirectories; no annotations are needed for
+  unsupervised VAE training). COCO provides `train2017/` (~118k images) and `val2017/`
+  (~5k images), meeting sample-level unseen requirements.
+- **Image resolution**: 256×256 (fixed; do not add a 32×32 shortcut option as it was
+  included only for the previous smaller dataset).
 - **Model**: Standard convolutional VAE (ConvVAE). Do not implement hierarchical VAE,
   normalizing flows, or other complex structures.
 - **Improvement items**: Only three lightweight improvements (Section 6). No additional
@@ -114,17 +116,17 @@ All outputs go to `outputs/` (git-ignored), not in version control.
   ```yaml
   exp_name: baseline          # Experiment name, determines outputs/ subdirectory
   seed: 42
-  data_dir: data/imagenette2-160
-  image_size: 64
-  batch_size: 128
+  data_dir: data/coco2017     # contains train2017/ and val2017/ flat image directories
+  image_size: 256
+  batch_size: 32              # Reduced from 128 due to 256×256 resolution memory cost
   num_workers: 4
 
-  latent_dim: 128
+  latent_dim: 1024
   base_channels: 32           # Change to 16 for lite config
   beta: 1.0
-  kl_anneal_epochs: 0         # >0: linearly anneal beta over first N epochs; 0: disabled
+  kl_anneal_epochs: 10        # Anneal KL over first 10 epochs to stabilize early training
 
-  epochs: 50
+  epochs: 100
   lr: 0.001
   use_amp: true               # Whether to use mixed precision
 
@@ -135,23 +137,33 @@ All outputs go to `outputs/` (git-ignored), not in version control.
 
 ### 5.2 Data Loading (`src/dataset.py`)
 
-- Use `torchvision.datasets.ImageFolder` to load `{data_dir}/train` and `{data_dir}/val`
-  separately.
+COCO 2017 stores images in flat directories (`train2017/*.jpg`, `val2017/*.jpg`) with no
+class subdirectories. Since VAE training is unsupervised, no labels or annotations are needed.
+Implement a custom `CocoImageDataset(Dataset)` class:
+
+- Constructor takes `root_dir` (e.g. `data/coco2017/train2017`) and `transform`.
+- On init, collect all `.jpg` (and `.jpeg`) file paths in `root_dir` using `glob` or `os.walk`.
+- `__len__` returns the number of files; `__getitem__` opens image via PIL, converts to RGB,
+  applies transform, and returns the tensor (no label needed).
 - Train set transforms: `Resize(image_size)` → `CenterCrop(image_size)` →
-  `RandomHorizontalFlip()` → `ToTensor()` (outputs range [0,1]).
+  `RandomHorizontalFlip()` → `ToTensor()` (output range [0,1]).
 - Val set transforms: `Resize(image_size)` → `CenterCrop(image_size)` → `ToTensor()`.
 - **Do not normalize beyond [0,1]** (decoder output is Sigmoid, reconstruction target is [0,1]).
-- Provide a function returning `(train_loader, val_loader)`.
+- Provide a `get_dataloaders(config)` function that builds both datasets and returns
+  `(train_loader, val_loader)`. Derive image dir paths as `{data_dir}/train2017` and
+  `{data_dir}/val2017`.
 
 ### 5.3 Model (`src/model.py`)
 
 Implement standard convolutional VAE, class name: `ConvVAE`:
 
 **Encoder** — Composed of downsampling blocks: `Conv(kernel=4, stride=2, padding=1) + BatchNorm + ReLU`.
-Number of downsampling layers computed automatically from `image_size` (each layer halves spatial
-dims, down to 4×4; e.g., 64→4 needs 4 layers, 32→4 needs 3 layers; assume image_size is power of 2).
-Channel count doubles each layer starting from `base_channels`. After flattening features, apply
-two linear layers to output `mu` and `logvar` (both of dimension `latent_dim`).
+Number of downsampling layers computed automatically from `image_size` as `log2(image_size) - 2`
+(each layer halves spatial dims, down to 4×4; e.g., 256→4 needs **6 layers**,
+64→4 needs 4 layers; assume image_size is power of 2).
+Channel count doubles each layer starting from `base_channels` (so with base_channels=32 and
+6 layers: 32→64→128→256→512→1024). After flattening features, apply two linear layers to
+output `mu` and `logvar` (both of dimension `latent_dim`).
 
 **Reparameterization** — `z = mu + exp(0.5 * logvar) * eps`, where `eps ~ N(0, I)`.
 
@@ -246,9 +258,15 @@ Improvements are implemented via config switching, no code branching needed:
 
 ## 7. Run Scripts
 
-- `scripts/download_data.sh`: Download Imagenette 160px version using `wget`
-  (`https://s3.amazonaws.com/fast-ai-imageclas/imagenette2-160.tgz`), extract to `data/`.
-  After extraction: `data/imagenette2-160/{train,val}/<class>/<image>.JPEG`.
+- `scripts/download_data.sh`: Download COCO 2017 train and val images using `wget`, extract
+  to `data/coco2017/`. After extraction the structure must be:
+  `data/coco2017/train2017/*.jpg` (~118k images, ~18GB) and
+  `data/coco2017/val2017/*.jpg` (~5k images, ~1GB).
+  Download URLs:
+  - Train: `http://images.cocodataset.org/zips/train2017.zip`
+  - Val:   `http://images.cocodataset.org/zips/val2017.zip`
+  The script should: create `data/coco2017/`, download each zip, unzip into `data/coco2017/`,
+  then delete the zip files to save disk space.
 - `scripts/run_all.sh`: Sequentially run `python -m src.train --config configs/baseline.yaml`,
   `beta_0.5.yaml`, `beta_4.yaml`, `lite.yaml`, then `python -m src.compare`.
 
