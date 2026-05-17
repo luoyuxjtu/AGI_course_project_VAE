@@ -1,19 +1,19 @@
 exp_name: baseline
 seed: 42
-data_dir: data/imagenette2-160
-image_size: 64
-batch_size: 128
+data_dir: data/coco2017    # contains train2017/ and val2017/ flat image directories
+image_size: 256
+batch_size: 32             # reduced from 128 due to 256×256 memory cost
 num_workers: 4
 
-latent_dim: 128
-base_channels: 32
+latent_dim: 1024
+base_channels: 32          # Change to 16 for lite config
 beta: 1.0
-kl_anneal_epochs: 0
+kl_anneal_epochs: 10       # Anneal KL over first 10 epochs to stabilize early training
 
-epochs: 50
+epochs: 100
 lr: 0.001
-use_amp: true
+use_amp: true              # Whether to use mixed precision
 
-num_samples: 64
-num_interpolations: 8
-compute_fid: false
+num_samples: 64            # Number of samples to generate during evaluation
+num_interpolations: 8      # Number of interpolation sequences
+compute_fid: false         # Whether to compute FID (optional, requires torchmetrics)

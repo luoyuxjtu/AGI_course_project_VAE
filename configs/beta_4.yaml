@@ -1,16 +1,16 @@
 exp_name: beta_4
 seed: 42
-data_dir: data/imagenette2-160
-image_size: 64
-batch_size: 128
+data_dir: data/coco2017
+image_size: 256
+batch_size: 32
 num_workers: 4
 
-latent_dim: 128
+latent_dim: 1024
 base_channels: 32
 beta: 4.0
-kl_anneal_epochs: 0
+kl_anneal_epochs: 10
 
-epochs: 50
+epochs: 100
 lr: 0.001
 use_amp: true
 

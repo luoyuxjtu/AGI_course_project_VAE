@@ -51,7 +51,9 @@ class ConvVAE(nn.Module):
         # Number of Conv / ConvTranspose blocks.
         # Each block halves (or doubles) the spatial dimension, so we need
         # log2(image_size / 4) steps to go from image_size down to 4×4.
-        num_layers: int = int(math.log2(image_size)) - 2  # 64→4: log2(64)-2=4
+        # image_size=64:  log2(64) -2 = 4 layers, channels 32→64→128→256
+        # image_size=256: log2(256)-2 = 6 layers, channels 32→64→128→256→512→1024
+        num_layers: int = int(math.log2(image_size)) - 2
 
         # ------------------------------------------------------------------ #
         # Encoder                                                             #

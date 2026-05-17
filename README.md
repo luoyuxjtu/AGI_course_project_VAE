@@ -1,9 +1,9 @@
 # VAE Generative Model Practice Project
 
 An entry-level hands-on implementation of a **Variational Autoencoder (ConvVAE)**
-trained on [Imagenette](https://github.com/fastai/imagenette) (a 10-class ImageNet
-subset). The goal is to build intuitive understanding of generative AI through
-implementation and experiment, not to pursue state-of-the-art results.
+trained on [COCO 2017](https://cocodataset.org/) at 256×256 resolution. The goal
+is to build intuitive understanding of generative AI through implementation and
+experiment, not to pursue state-of-the-art results.
 
 ---
 
@@ -11,8 +11,8 @@ implementation and experiment, not to pursue state-of-the-art results.
 
 ### Module 1 — Application Practice
 
-Train a ConvVAE on Imagenette and apply it to three generative tasks on
-**unseen** validation samples:
+Train a ConvVAE on COCO 2017 (256×256) and apply it to three generative tasks
+on **unseen** validation samples:
 
 | Task | Output file |
 |---|---|
@@ -20,8 +20,8 @@ Train a ConvVAE on Imagenette and apply it to three generative tasks on
 | **Reconstruction** — encode val images, decode back | `reconstructions.png` |
 | **Interpolation** — linearly interpolate between latent means | `interpolations.png` |
 
-The train/val split in Imagenette provides the sample-level held-out set
-(the model never sees val images during training).
+COCO's train2017 / val2017 split provides the sample-level held-out set
+(the model never sees val2017 images during training).
 
 ### Module 2 — Model Improvements
 
@@ -56,12 +56,12 @@ standard VAE:
 │   ├── beta_4.yaml         # β=4.0, base_channels=32
 │   └── lite.yaml           # β=1.0, base_channels=16  (lightweight)
 ├── scripts/
-│   ├── download_data.sh    # Download & extract Imagenette to data/
+│   ├── download_data.sh    # Download COCO 2017 train+val to data/coco2017/
 │   └── run_all.sh          # Run all 4 experiments + comparison
 ├── src/
 │   ├── __init__.py
 │   ├── config.py           # YAML loader, --config argument parsing
-│   ├── dataset.py          # ImageFolder DataLoaders (train + val)
+│   ├── dataset.py          # CocoImageDataset + DataLoaders (train + val)
 │   ├── model.py            # ConvVAE (encoder / reparameterisation / decoder)
 │   ├── losses.py           # ELBO loss: MSE reconstruction + β·KL
 │   ├── utils.py            # set_seed, checkpoints, image grid, MetricsLogger
@@ -146,15 +146,18 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 bash scripts/download_data.sh
 ```
 
-Downloads `imagenette2-160.tgz` (~100 MB) and extracts it. Re-running is safe —
-the script skips the download if the dataset already exists.
+Downloads COCO 2017 train and val images (~19 GB total). Re-running is safe —
+each split is skipped if its directory already exists.
+
+> **Disk space**: ~19 GB during download, ~19 GB after extraction (zips are
+> deleted automatically). Ensure you have at least 40 GB free.
 
 Expected layout after extraction:
 
 ```
-data/imagenette2-160/
-├── train/<class>/<image>.JPEG   (~9,469 images)
-└── val/<class>/<image>.JPEG     (~3,925 images)
+data/coco2017/
+├── train2017/*.jpg   (~118,000 images, ~18 GB)
+└── val2017/*.jpg     (~5,000 images,   ~1 GB)
 ```
 
 ### Step 5 — Run all experiments
@@ -237,13 +240,13 @@ are skipped with a warning.
 Key config fields (edit `configs/*.yaml` to change):
 
 ```yaml
-epochs: 50          # total training epochs
-lr: 0.001           # Adam learning rate
-use_amp: true       # mixed-precision training (requires CUDA)
-kl_anneal_epochs: 0 # >0: linearly ramp beta from 0 to target over N epochs
-image_size: 64      # change to 32 for faster iteration
-batch_size: 128
-latent_dim: 128
+epochs: 100            # total training epochs
+lr: 0.001              # Adam learning rate
+use_amp: true          # mixed-precision training (requires CUDA)
+kl_anneal_epochs: 10   # linearly ramp beta 0→target over first 10 epochs
+image_size: 256        # 256×256 resolution
+batch_size: 32         # reduced vs 64px to fit 256×256 in GPU memory
+latent_dim: 1024
 ```
 
 ---
