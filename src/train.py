@@ -35,7 +35,7 @@ from src.config import load_config
 from src.dataset import get_dataloaders
 from src.losses import elbo_loss
 from src.model import build_model
-from src.utils import MetricsLogger, save_checkpoint, set_seed
+from src.utils import MetricsLogger, load_checkpoint, save_checkpoint, set_seed
 
 
 # ------------------------------------------------------------------ #
@@ -163,10 +163,28 @@ def main(cfg=None) -> None:
 
     logger = MetricsLogger(out_dir / "metrics.json")
 
-    # -- Training loop -------------------------------------------------
+    # -- Checkpoint resume ---------------------------------------------
     best_val_loss = float("inf")
+    start_epoch = 0
 
-    for epoch in range(cfg.epochs):
+    ckpt_path = out_dir / "last.pt"
+    if ckpt_path.exists():
+        ckpt = load_checkpoint(ckpt_path, model, optimizer, scaler)
+        start_epoch = ckpt["epoch"] + 1
+        best_val_loss = ckpt["best_val_loss"]
+        print(
+            f"[train] Resumed from {ckpt_path}  "
+            f"(epoch {ckpt['epoch'] + 1}/{cfg.epochs}, "
+            f"best_val_loss={best_val_loss:.4f})"
+        )
+
+    if start_epoch >= cfg.epochs:
+        print(f"[train] Training already complete ({cfg.epochs} epochs done).")
+    else:
+        print(f"[train] Starting from epoch {start_epoch + 1}/{cfg.epochs}")
+
+    # -- Training loop -------------------------------------------------
+    for epoch in range(start_epoch, cfg.epochs):
 
         # KL annealing: ramp beta linearly from 0 → cfg.beta over the first
         # kl_anneal_epochs epochs.  Purpose: let the model learn good

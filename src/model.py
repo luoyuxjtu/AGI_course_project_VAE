@@ -141,7 +141,12 @@ class ConvVAE(nn.Module):
         """
         h = self.encoder(x)                 # (B, feature_channels, 4, 4)
         h = h.flatten(start_dim=1)          # (B, feature_channels * 16)
-        return self.fc_mu(h), self.fc_logvar(h)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        # Clamp prevents extreme logvar during early training (large fan-in
+        # linear layers can produce huge initial values → KL overflow → NaN).
+        logvar = torch.clamp(logvar, min=-10.0, max=10.0)
+        return mu, logvar
 
     def reparameterise(
         self, mu: torch.Tensor, logvar: torch.Tensor

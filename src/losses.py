@@ -71,6 +71,8 @@ def elbo_loss(
     kl = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
 
     # --- Total ELBO loss ----------------------------------------------
-    total = recon + beta * kl
+    # Guard: when beta=0 (KL annealing warm-up) skip the KL term entirely
+    # to avoid 0 * inf = NaN, which occurs if logvar overflows to ±inf.
+    total = recon if beta == 0.0 else recon + beta * kl
 
     return recon, kl, total
