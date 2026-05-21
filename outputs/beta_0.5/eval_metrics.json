@@ -1,0 +1,12 @@
+{
+  "exp_name": "beta_0.5",
+  "n_params": 72706947,
+  "beta": 0.5,
+  "base_channels": 32,
+  "latent_dim": 1024,
+  "image_size": 256,
+  "final_val_recon": 1484.6831,
+  "final_val_kl": 937.2334,
+  "final_val_total": 1953.2998,
+  "fid": null
+}
