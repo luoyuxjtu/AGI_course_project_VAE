@@ -1,0 +1,12 @@
+{
+  "exp_name": "baseline",
+  "n_params": 72706947,
+  "beta": 1.0,
+  "base_channels": 32,
+  "latent_dim": 1024,
+  "image_size": 256,
+  "final_val_recon": 1750.5888,
+  "final_val_kl": 608.1003,
+  "final_val_total": 2358.6891,
+  "fid": null
+}

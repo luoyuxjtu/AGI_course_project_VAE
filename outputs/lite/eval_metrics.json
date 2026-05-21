@@ -1,0 +1,12 @@
+{
+  "exp_name": "lite",
+  "n_params": 30767555,
+  "beta": 1.0,
+  "base_channels": 16,
+  "latent_dim": 1024,
+  "image_size": 256,
+  "final_val_recon": 1829.3244,
+  "final_val_kl": 593.8321,
+  "final_val_total": 2423.1566,
+  "fid": null
+}
