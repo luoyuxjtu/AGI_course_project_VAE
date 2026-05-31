@@ -1,9 +1,9 @@
-# VAE Generative Model Practice Project
+# GAN Image Inpainting Practice Project
 
-An entry-level hands-on implementation of a **Variational Autoencoder (ConvVAE)**
-trained on [COCO 2017](https://cocodataset.org/) at 256×256 resolution. The goal
-is to build intuitive understanding of generative AI through implementation and
-experiment, not to pursue state-of-the-art results.
+An entry-level hands-on implementation of a **GAN-based image inpainting** model
+trained on [COCO 2017](https://cocodataset.org/) at 256×256 resolution.
+Given an image with a randomly masked region, the generator fills in plausible
+content; a PatchGAN discriminator drives the completions toward realistic textures.
 
 ---
 
@@ -11,39 +11,35 @@ experiment, not to pursue state-of-the-art results.
 
 ### Module 1 — Application Practice
 
-Train a ConvVAE on COCO 2017 (256×256) and apply it to three generative tasks
-on **unseen** validation samples:
+Train a Context-Encoder-style generator + PatchGAN discriminator on COCO 2017
+`train2017` and evaluate on the **unseen** `val2017` set:
 
-| Task | Output file |
+| Output | Description |
 |---|---|
-| **Generation** — sample z ~ N(0,I), decode to new images | `samples.png` |
-| **Reconstruction** — encode val images, decode back | `reconstructions.png` |
-| **Interpolation** — linearly interpolate between latent means | `interpolations.png` |
-
-COCO's train2017 / val2017 split provides the sample-level held-out set
-(the model never sees val2017 images during training).
+| `inpainting.png` | `num_vis` rows of `[masked input | completion | ground truth]` |
+| `loss_curve.png` | D loss, G adversarial loss, G recon L1, val L1 vs epoch |
+| `eval_metrics.json` | Val L1, PSNR, SSIM, G/D parameter counts, optional FID |
 
 ### Module 2 — Model Improvements
 
-Three improvements, each controlled purely by config (no code changes):
+Three improvements, each controlled by config (no code changes):
 
 | Improvement | Mechanism | Configs |
 |---|---|---|
-| **Generation quality** | β-VAE: vary KL weight β | `baseline` / `beta_0.5` / `beta_4` |
+| **Generation quality** | Adversarial loss ablation: full GAN vs L1 only | `baseline` vs `recon_only` |
 | **Computational efficiency** | Mixed-precision AMP (`use_amp: true`) | all configs |
-| **Lightweighting** | Halve encoder/decoder channels | `baseline` vs `lite` |
+| **Lightweighting** | Halve G and D base channels (32→16) | `baseline` vs `lite` |
 
 ### Module 3 — Theoretical Analysis
 
-Based on experimental results, discuss three theoretical assumptions of the
-standard VAE:
+Based on experimental results, discuss three topics:
 
-1. **Prior distribution** — p(z) = N(0,I): does the β-VAE comparison reveal
-   how well the learned posterior matches this prior?
-2. **Approximate posterior** — q(z|x) = N(μ,diag(σ²)): limitations of the
-   diagonal Gaussian family.
-3. **Gaussian likelihood** — p(x|z) ∝ exp(−‖x−x̂‖²): using MSE reconstruction
-   assumes fixed variance; what does this mean for sample sharpness?
+1. **L1 blurriness vs adversarial sharpness** — compare `baseline` vs `recon_only`:
+   L1 minimises expected pixel error, averaging over multi-modal completions;
+   the adversarial term pushes results onto the real-image manifold.
+2. **Adversarial training dynamics** — D and G loss curves; the GAN minimax game.
+3. **Reconstruction loss trade-off** — higher `lambda_rec` anchors structure
+   but may damp texture; lower values allow more hallucination.
 
 ---
 
@@ -51,23 +47,22 @@ standard VAE:
 
 ```
 ├── configs/
-│   ├── baseline.yaml       # β=1.0, base_channels=32  (reference)
-│   ├── beta_0.5.yaml       # β=0.5, base_channels=32
-│   ├── beta_4.yaml         # β=4.0, base_channels=32
-│   └── lite.yaml           # β=1.0, base_channels=16  (lightweight)
+│   ├── baseline.yaml       # Full GAN (L1 + adversarial, base_channels=32)
+│   ├── recon_only.yaml     # L1 only  (lambda_adv=0, no discriminator update)
+│   └── lite.yaml           # Full GAN, base_channels=16 (lightweight)
 ├── scripts/
 │   ├── download_data.sh    # Download COCO 2017 train+val to data/coco2017/
-│   └── run_all.sh          # Run all 4 experiments + comparison
+│   └── run_all.sh          # Run all 3 experiments + comparison
 ├── src/
 │   ├── __init__.py
 │   ├── config.py           # YAML loader, --config argument parsing
-│   ├── dataset.py          # CocoImageDataset + DataLoaders (train + val)
-│   ├── model.py            # ConvVAE (encoder / reparameterisation / decoder)
-│   ├── losses.py           # ELBO loss: MSE reconstruction + β·KL
-│   ├── utils.py            # set_seed, checkpoints, image grid, MetricsLogger
-│   ├── train.py            # Training loop (AMP, KL annealing, auto-eval)
-│   ├── evaluate.py         # Generation, reconstruction, interpolation, metrics
-│   └── compare.py          # Cross-experiment plots and summary table
+│   ├── dataset.py          # CocoImageDataset, generate_mask, make_masked_image
+│   ├── model.py            # Generator (Context-Encoder) + Discriminator (PatchGAN)
+│   ├── losses.py           # L1 reconstruction + BCEWithLogits adversarial losses
+│   ├── utils.py            # set_seed, checkpoints (G+D), image grid, MetricsLogger
+│   ├── train.py            # Adversarial training loop (AMP, adv warmup, auto-eval)
+│   ├── evaluate.py         # Inpainting visualisation, loss curves, metrics
+│   └── compare.py          # GAN vs recon figure + summary table
 ├── README.md
 ├── requirements.txt
 └── .gitignore
@@ -77,38 +72,33 @@ All experiment outputs go to `outputs/` (git-ignored):
 
 ```
 outputs/
-├── baseline/               # checkpoints, metrics.json, eval images
-├── beta_0.5/
-├── beta_4/
+├── baseline/               # best.pt, last.pt, metrics.json, eval_metrics.json,
+├── recon_only/             # inpainting.png, loss_curve.png
 ├── lite/
-└── comparison/             # beta_comparison.png, summary.md
+└── comparison/             # gan_vs_recon.png, summary.md
 ```
 
 ---
 
 ## Running on a GPU Server
 
-### Step 0 — Clone the repository
+### Step 0 — Clone (or pull) the repository
 
 ```bash
 git clone <repo-url>
 cd AGI_course_project_VAE
-```
-
-If you already cloned it, pull the latest code:
-
-```bash
+# or, if already cloned:
 git pull
 ```
 
 ### Step 1 — Create the conda environment
 
 ```bash
-conda create -n vae python=3.10 -y
-conda activate vae
+conda create -n gan python=3.10 -y
+conda activate gan
 ```
 
-### Step 2 — Install PyTorch (CUDA 12.1)
+### Step 2 — Install PyTorch with CUDA
 
 ```bash
 conda install pytorch==2.2.2 torchvision==0.17.2 pytorch-cuda=12.1 \
@@ -119,25 +109,23 @@ conda install pytorch==2.2.2 torchvision==0.17.2 pytorch-cuda=12.1 \
 <summary>Prefer pip?</summary>
 
 ```bash
-pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.2.2 torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cu121
 ```
 
 </details>
-
-### Step 3 — Install remaining dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-`requirements.txt` declares `torch>=2.1.0` and `torchvision>=0.16.0` as lower
-bounds; pip will skip reinstalling the CUDA build you just installed.
 
 Verify CUDA is available:
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # Expected: 2.2.2 True
+```
+
+### Step 3 — Install remaining dependencies
+
+```bash
+pip install -r requirements.txt
 ```
 
 ### Step 4 — Download the dataset
@@ -149,10 +137,9 @@ bash scripts/download_data.sh
 Downloads COCO 2017 train and val images (~19 GB total). Re-running is safe —
 each split is skipped if its directory already exists.
 
-> **Disk space**: ~19 GB during download, ~19 GB after extraction (zips are
-> deleted automatically). Ensure you have at least 40 GB free.
+> **Disk space**: ~40 GB free recommended (zips are deleted after extraction).
 
-Expected layout after extraction:
+Expected layout:
 
 ```
 data/coco2017/
@@ -166,88 +153,85 @@ data/coco2017/
 bash scripts/run_all.sh
 ```
 
-This runs four experiments in sequence. Each `src.train` call automatically
-invokes `src.evaluate` after training, so one command covers:
+Runs three experiments sequentially; each `src.train` call automatically invokes
+`src.evaluate` after training, then `src.compare` collates all results:
 
 ```
-train baseline  → eval baseline
-train beta_0.5  → eval beta_0.5
-train beta_4    → eval beta_4
-train lite      → eval lite
-python -m src.compare          ← generates comparison outputs
+train baseline   → eval baseline
+train recon_only → eval recon_only
+train lite       → eval lite
+python -m src.compare
 ```
 
-Total wall time is roughly **4 × (training time)** depending on your GPU.
+Monitor progress in another terminal:
+
+```bash
+tail -f outputs/baseline/train.log
+```
 
 ### Step 6 — Inspect outputs
 
-```
-outputs/
-├── baseline/
-│   ├── best.pt                  model checkpoint (best val loss)
-│   ├── last.pt                  model checkpoint (final epoch)
-│   ├── metrics.json             per-epoch train/val losses + timing
-│   ├── eval_metrics.json        final losses, n_params, optional FID
-│   ├── samples.png              64 images sampled from N(0,I)
-│   ├── reconstructions.png      8 val originals vs reconstructions
-│   ├── interpolations.png       8 latent-space interpolation sequences
-│   └── loss_curve.png           total / recon / KL curves
-├── beta_0.5/  beta_4/  lite/   (same structure)
-└── comparison/
-    ├── beta_comparison.png      side-by-side for baseline/β0.5/β4
-    └── summary.md               table: losses, n_params, FID for all 4 exps
-```
+| Path | Contents |
+|---|---|
+| `outputs/<exp>/inpainting.png` | `num_vis` triplet rows: masked \| completed \| original |
+| `outputs/<exp>/loss_curve.png` | D loss, G adv, G recon, val L1 vs epoch |
+| `outputs/<exp>/eval_metrics.json` | val L1, PSNR, SSIM, param counts, FID |
+| `outputs/<exp>/best.pt` | Best-val-L1 checkpoint (G + D + optimisers) |
+| `outputs/comparison/gan_vs_recon.png` | Baseline vs recon_only side-by-side |
+| `outputs/comparison/summary.md` | All-experiment metrics table |
 
 ---
 
 ## Running Individual Steps
 
-### Train one experiment
-
 ```bash
+# Train one experiment
 python -m src.train --config configs/baseline.yaml
-```
 
-### Re-run evaluation from a saved checkpoint
-
-```bash
+# Re-run evaluation from a saved checkpoint
 python -m src.evaluate --config configs/baseline.yaml
-```
 
-Loads `outputs/baseline/best.pt` and regenerates all image outputs and
-`eval_metrics.json`.
-
-### Re-run comparison analysis
-
-```bash
+# Re-run comparison analysis
 python -m src.compare
 ```
 
-Reads `eval_metrics.json` from all available experiments. Missing experiments
-are skipped with a warning.
+---
+
+## Key Config Fields
+
+```yaml
+base_channels: 32       # G and D channel multiplier; 16 for lite
+bottleneck_dim: 1024    # deterministic G bottleneck size
+
+lambda_rec: 100.0       # weight on L1 reconstruction loss
+lambda_adv: 1.0         # weight on adversarial loss (0 = recon_only)
+adv_warmup_epochs: 5    # epochs of recon-only warm-up before adversarial starts
+
+mask_min_ratio: 0.25    # hole size range as fraction of image_size
+mask_max_ratio: 0.5
+
+epochs: 100
+lr_g: 0.0002            # generator Adam learning rate
+lr_d: 0.0002            # discriminator Adam learning rate
+beta1: 0.5              # Adam beta1 (standard for GAN training)
+use_amp: true           # mixed-precision training (requires CUDA)
+```
 
 ---
 
-## Experiment Configs at a Glance
+## Architecture Summary
 
-| Config | β | base_channels | Purpose |
-|---|---|---|---|
-| `baseline.yaml` | 1.0 | 32 | Reference model |
-| `beta_0.5.yaml` | 0.5 | 32 | Less KL → sharper reconstructions |
-| `beta_4.yaml` | 4.0 | 32 | More KL → structured latent space |
-| `lite.yaml` | 1.0 | 16 | Lightweight (≈¼ the parameters of full model) |
+**Generator** (Context-Encoder style)
+- Input: 4 channels `[masked_rgb (3) | mask (1)]`
+- Encoder: `Conv(k=4,s=2,p=1) + BN + ReLU` × 6 (256→4, channels 4→1024)
+- Bottleneck: `Linear(flat→bottleneck_dim) → Linear(bottleneck_dim→flat)` (deterministic)
+- Decoder: `ConvTranspose(k=4,s=2,p=1) + BN + ReLU` × 5 + Sigmoid; no skip connections
+- Output: `x_completed = x_masked + mask * G_out` (known pixels preserved exactly)
 
-Key config fields (edit `configs/*.yaml` to change):
-
-```yaml
-epochs: 100            # total training epochs
-lr: 0.001              # Adam learning rate
-use_amp: true          # mixed-precision training (requires CUDA)
-kl_anneal_epochs: 10   # linearly ramp beta 0→target over first 10 epochs
-image_size: 256        # 256×256 resolution
-batch_size: 32         # reduced vs 64px to fit 256×256 in GPU memory
-latent_dim: 1024
-```
+**Discriminator** (PatchGAN)
+- Input: 3-channel RGB (real or completed)
+- 4 × `Conv(k=4,s=2,p=1) + [InstanceNorm] + LeakyReLU(0.2)` + final Conv → 1 ch logit map
+- No Sigmoid; use `BCEWithLogitsLoss`; ~70×70 receptive field at 256×256
 
 ---
 
@@ -260,5 +244,5 @@ latent_dim: 1024
 | `pyyaml` | YAML config loading |
 | `matplotlib` | Loss curves and comparison figures |
 | `tqdm` | Training progress bars |
-| `pillow` | Saving image grids as PNG |
-| `torchmetrics` | Optional FID computation (`compute_fid: true`) |
+| `pillow` | Image loading and grid saving |
+| `torchmetrics` | PSNR, SSIM, optional FID (`compute_fid: true`) |

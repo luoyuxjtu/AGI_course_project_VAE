@@ -1,80 +1,60 @@
 #!/usr/bin/env bash
-# Run all 4 experiments in parallel on 4 GPUs, then compare.
+# Run all three GAN inpainting experiments sequentially, then compare.
 #
-# Prerequisites:
-#   - 4 CUDA GPUs available (indices 0–3).  Adjust CUDA_VISIBLE_DEVICES
-#     assignments below if your GPU indices differ.
-#   - Run from the project root:  bash scripts/run_all.sh
+# Run from the project root:
+#   bash scripts/run_all.sh
 #
-# Each experiment is pinned to one GPU via CUDA_VISIBLE_DEVICES and its
-# stdout+stderr are tee'd to outputs/<exp>/train.log so you can tail them
-# while training is in progress:
+# Each `src.train` call automatically invokes `src.evaluate` after
+# training, so one command covers:
+#
+#   train baseline   → eval baseline   (inpainting.png, loss_curve.png, eval_metrics.json)
+#   train recon_only → eval recon_only
+#   train lite       → eval lite
+#   python -m src.compare              (gan_vs_recon.png, summary.md)
+#
+# Stdout + stderr for each experiment are tee'd to outputs/<exp>/train.log
+# so you can monitor progress in another terminal:
 #
 #   tail -f outputs/baseline/train.log
 #
-# If training is interrupted, re-running this script will automatically
-# resume each experiment from its last saved checkpoint.
+# Interrupted runs resume automatically from the last saved checkpoint.
 
 set -uo pipefail
 
 total_start=$(date +%s)
 
-mkdir -p outputs/baseline outputs/beta_0.5 outputs/beta_4 outputs/lite
+mkdir -p outputs/baseline outputs/recon_only outputs/lite
 
 echo "================================================================"
-echo "  Starting 4 experiments in parallel (one GPU each)"
+echo "  GAN inpainting — running 3 experiments sequentially"
 echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "================================================================"
 echo ""
 
-CUDA_VISIBLE_DEVICES=0 python -m src.train --config configs/baseline.yaml \
-    >> outputs/baseline/train.log 2>&1 &
-PID_BASELINE=$!
+run_exp() {
+    local config="$1"
+    local exp="$2"
+    local log="outputs/${exp}/train.log"
 
-CUDA_VISIBLE_DEVICES=1 python -m src.train --config configs/beta_0.5.yaml \
-    >> outputs/beta_0.5/train.log 2>&1 &
-PID_BETA05=$!
+    echo "----------------------------------------------------------------"
+    echo "  Starting: $exp  (config: $config)"
+    echo "  Log: $log"
+    echo "  $(date '+%H:%M:%S')"
+    echo "----------------------------------------------------------------"
 
-CUDA_VISIBLE_DEVICES=2 python -m src.train --config configs/beta_4.yaml \
-    >> outputs/beta_4/train.log   2>&1 &
-PID_BETA4=$!
-
-CUDA_VISIBLE_DEVICES=3 python -m src.train --config configs/lite.yaml \
-    >> outputs/lite/train.log     2>&1 &
-PID_LITE=$!
-
-echo "  [GPU 0] baseline  (β=1.0, ch=32)  PID=$PID_BASELINE  → outputs/baseline/train.log"
-echo "  [GPU 1] beta_0.5  (β=0.5, ch=32)  PID=$PID_BETA05   → outputs/beta_0.5/train.log"
-echo "  [GPU 2] beta_4    (β=4.0, ch=32)  PID=$PID_BETA4    → outputs/beta_4/train.log"
-echo "  [GPU 3] lite      (β=1.0, ch=16)  PID=$PID_LITE     → outputs/lite/train.log"
-echo ""
-echo "Waiting for all experiments to complete …"
-echo "(run  tail -f outputs/<exp>/train.log  in another terminal to monitor)"
-echo ""
-
-FAILED=0
-NAMES=(baseline beta_0.5 beta_4 lite)
-PIDS=($PID_BASELINE $PID_BETA05 $PID_BETA4 $PID_LITE)
-
-for i in 0 1 2 3; do
-    if wait "${PIDS[$i]}"; then
-        echo "  [GPU $i] ${NAMES[$i]}  — done"
+    if python -m src.train --config "$config" 2>&1 | tee "$log"; then
+        echo "  ✓ $exp complete"
     else
-        echo "  [GPU $i] ${NAMES[$i]}  — FAILED (exit $?; see outputs/${NAMES[$i]}/train.log)" >&2
-        FAILED=1
+        echo "  ✗ $exp FAILED — see $log" >&2
+        exit 1
     fi
-done
+    echo ""
+}
 
-total_elapsed=$(( $(date +%s) - total_start ))
-echo ""
-echo "All experiments finished in ${total_elapsed}s."
+run_exp configs/baseline.yaml   baseline
+run_exp configs/recon_only.yaml recon_only
+run_exp configs/lite.yaml       lite
 
-if [ $FAILED -ne 0 ]; then
-    echo "ERROR: one or more experiments failed." >&2
-    exit 1
-fi
-
-echo ""
 echo "================================================================"
 echo "  Comparison analysis"
 echo "================================================================"
@@ -82,8 +62,9 @@ python -m src.compare
 
 total_elapsed=$(( $(date +%s) - total_start ))
 echo ""
-echo "All done in ${total_elapsed}s."
-echo "Results are in outputs/:"
-echo "  outputs/baseline/      outputs/beta_0.5/"
-echo "  outputs/beta_4/        outputs/lite/"
-echo "  outputs/comparison/    (beta_comparison.png + summary.md)"
+echo "================================================================"
+echo "  All done in ${total_elapsed}s"
+echo "  Outputs:"
+echo "    outputs/baseline/     outputs/recon_only/   outputs/lite/"
+echo "    outputs/comparison/   (gan_vs_recon.png + summary.md)"
+echo "================================================================"
