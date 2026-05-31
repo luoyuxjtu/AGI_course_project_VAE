@@ -1,10 +1,10 @@
 """
-Utility functions for the VAE project.
+Utility functions for the GAN inpainting project.
 
 Contents
 --------
 set_seed            — fix all RNG seeds for reproducibility
-save_checkpoint     — persist model + optimiser + training state
+save_checkpoint     — persist G + D + both optimisers + training state
 load_checkpoint     — restore from a checkpoint file
 save_image_grid     — write a grid of images to disk
 MetricsLogger       — append per-epoch metrics to metrics.json
@@ -48,62 +48,88 @@ def set_seed(seed: int) -> None:
 
 def save_checkpoint(
     path: str | Path,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
+    generator: nn.Module,
+    discriminator: nn.Module,
+    opt_g: torch.optim.Optimizer,
+    opt_d: torch.optim.Optimizer,
     epoch: int,
     best_val_loss: float,
-    scaler: Any | None = None,
+    scaler_g: Any | None = None,
+    scaler_d: Any | None = None,
 ) -> None:
-    """Save model weights and training state to a .pt file.
+    """Save G + D weights and both optimiser states to a .pt file.
+
+    Storing both models and both optimisers lets training resume from
+    exactly the same point without a loss spike caused by stale momentum
+    estimates in Adam.
 
     Args:
         path:          Destination file path (e.g. outputs/baseline/last.pt).
-        model:         The ConvVAE (or any nn.Module).
-        optimizer:     Adam optimiser whose state we want to preserve so
-                       training can be resumed without a loss spike.
+        generator:     Generator nn.Module.
+        discriminator: Discriminator nn.Module.
+        opt_g:         Generator Adam optimiser.
+        opt_d:         Discriminator Adam optimiser.
         epoch:         Current epoch index (0-based).
-        best_val_loss: Best validation loss seen so far; used to decide
-                       whether to overwrite best.pt.
-        scaler:        Optional GradScaler for AMP; ignored when None.
+        best_val_loss: Best validation L1 seen so far.
+        scaler_g:      Optional AMP GradScaler for the generator.
+        scaler_d:      Optional AMP GradScaler for the discriminator.
     """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "epoch": epoch,
-        "best_val_loss": best_val_loss,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
+        "epoch":           epoch,
+        "best_val_loss":   best_val_loss,
+        "generator_state": generator.state_dict(),
+        "discriminator_state": discriminator.state_dict(),
+        "opt_g_state":     opt_g.state_dict(),
+        "opt_d_state":     opt_d.state_dict(),
     }
-    if scaler is not None:
-        payload["scaler_state"] = scaler.state_dict()
+    if scaler_g is not None:
+        payload["scaler_g_state"] = scaler_g.state_dict()
+    if scaler_d is not None:
+        payload["scaler_d_state"] = scaler_d.state_dict()
     torch.save(payload, path)
 
 
 def load_checkpoint(
     path: str | Path,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer | None = None,
-    scaler: Any | None = None,
+    generator: nn.Module,
+    discriminator: nn.Module | None = None,
+    opt_g: torch.optim.Optimizer | None = None,
+    opt_d: torch.optim.Optimizer | None = None,
+    scaler_g: Any | None = None,
+    scaler_d: Any | None = None,
 ) -> dict[str, Any]:
-    """Load a checkpoint and restore model (and optionally optimiser) state.
+    """Load a checkpoint and restore G (and optionally D + optimisers).
+
+    Passing only ``generator`` is enough for evaluation (no D or opts
+    needed).  Pass all arguments to resume training.
 
     Args:
-        path:      Path to the .pt checkpoint file.
-        model:     Model whose weights will be restored in-place.
-        optimizer: If provided, its state is also restored (for resuming
-                   training).  Pass None when loading only for evaluation.
-        scaler:    Optional GradScaler; its state is restored when provided.
+        path:          Path to the .pt checkpoint file.
+        generator:     Generator whose weights are restored in-place.
+        discriminator: If provided, its weights are restored.
+        opt_g:         If provided, generator optimiser state is restored.
+        opt_d:         If provided, discriminator optimiser state is restored.
+        scaler_g:      Optional AMP GradScaler for the generator.
+        scaler_d:      Optional AMP GradScaler for the discriminator.
 
     Returns:
-        A dict with keys ``epoch`` (int) and ``best_val_loss`` (float).
+        Dict with keys ``epoch`` (int) and ``best_val_loss`` (float).
     """
     payload = torch.load(path, map_location="cpu")
-    model.load_state_dict(payload["model_state"])
-    if optimizer is not None and "optimizer_state" in payload:
-        optimizer.load_state_dict(payload["optimizer_state"])
-    if scaler is not None and "scaler_state" in payload:
-        scaler.load_state_dict(payload["scaler_state"])
+    generator.load_state_dict(payload["generator_state"])
+    if discriminator is not None and "discriminator_state" in payload:
+        discriminator.load_state_dict(payload["discriminator_state"])
+    if opt_g is not None and "opt_g_state" in payload:
+        opt_g.load_state_dict(payload["opt_g_state"])
+    if opt_d is not None and "opt_d_state" in payload:
+        opt_d.load_state_dict(payload["opt_d_state"])
+    if scaler_g is not None and "scaler_g_state" in payload:
+        scaler_g.load_state_dict(payload["scaler_g_state"])
+    if scaler_d is not None and "scaler_d_state" in payload:
+        scaler_d.load_state_dict(payload["scaler_d_state"])
     return {
-        "epoch": payload.get("epoch", 0),
+        "epoch":         payload.get("epoch", 0),
         "best_val_loss": payload.get("best_val_loss", float("inf")),
     }
 
@@ -147,14 +173,12 @@ class MetricsLogger:
     Typical record shape::
 
         {
-            "epoch": 3,
-            "train_recon": 1234.5,
-            "train_kl":    12.3,
-            "train_total": 1246.8,
-            "val_recon":   1230.1,
-            "val_kl":      11.9,
-            "val_total":   1242.0,
-            "epoch_time_s": 45.2
+            "epoch":        3,
+            "d_loss":       0.45,
+            "g_adv":        0.82,
+            "g_recon":      0.031,
+            "val_l1":       0.028,
+            "epoch_time_s": 62.4
         }
 
     Args:
