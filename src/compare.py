@@ -1,23 +1,23 @@
 """
-Cross-experiment comparison and analysis.
+Cross-experiment comparison for the GAN inpainting project.
 
-Reads eval_metrics.json and image outputs from each experiment under
-outputs/, then writes:
+Reads outputs/{exp}/inpainting.png and eval_metrics.json from each
+completed experiment and writes:
 
-  outputs/comparison/beta_comparison.png
-      Side-by-side generated samples and reconstructions for the three
-      beta experiments (baseline β=1 / beta_0.5 β=0.5 / beta_4 β=4).
-      Higher β pushes the posterior closer to the prior (better latent
-      structure) at the cost of blurrier reconstructions — the grid makes
-      this trade-off visually obvious.
+  outputs/comparison/gan_vs_recon.png
+      Left column:  baseline  (full GAN, L1 + adversarial loss).
+      Right column: recon_only (L1 only, no discriminator).
+      Both columns show the same validation images with the same masks
+      (evaluate.py uses a fixed seed), so any visible difference is
+      due purely to the adversarial term — sharper vs blurrier fills.
 
   outputs/comparison/summary.md
-      Markdown table of final val losses, parameter counts, and optional
-      FID for all four experiments (baseline, beta_0.5, beta_4, lite).
-      Includes a note highlighting the parameter reduction of the lite model.
+      Table of val L1, PSNR, SSIM, G and D parameter counts, and
+      optional FID for all three experiments (baseline, recon_only, lite).
+      A section highlights the parameter reduction of the lite model.
 
-Missing experiments or image files are skipped with a warning;
-the script never raises an unhandled exception.
+Missing experiment outputs are skipped with a warning; the script never
+raises an unhandled exception.
 
 Usage
 -----
@@ -29,9 +29,9 @@ from pathlib import Path
 from typing import Optional
 
 import matplotlib
-matplotlib.use("Agg")  # headless-safe backend
-import matplotlib.pyplot as plt
+matplotlib.use("Agg")
 import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -40,18 +40,17 @@ import numpy as np
 # ------------------------------------------------------------------ #
 
 OUTPUTS_DIR = Path("outputs")
-COMP_DIR = OUTPUTS_DIR / "comparison"
+COMP_DIR    = OUTPUTS_DIR / "comparison"
 
-# Experiments included in the beta comparison panel
-BETA_EXPS = ["baseline", "beta_0.5", "beta_4"]
-BETA_LABELS = {
-    "baseline": "Baseline  β=1.0",
-    "beta_0.5": "β=0.5  (lower KL weight)",
-    "beta_4":   "β=4.0  (higher KL weight)",
+# Experiments shown in the adversarial-ablation figure
+GAN_VS_RECON_EXPS = ["baseline", "recon_only"]
+GAN_VS_RECON_LABELS = {
+    "baseline":   "Baseline GAN  (L1 + adversarial)",
+    "recon_only": "Recon only  (L1 only, no discriminator)",
 }
 
-# All experiments used in the summary table
-ALL_EXPS = ["baseline", "beta_0.5", "beta_4", "lite"]
+# All experiments included in the summary table
+ALL_EXPS = ["baseline", "recon_only", "lite"]
 
 
 # ------------------------------------------------------------------ #
@@ -59,10 +58,7 @@ ALL_EXPS = ["baseline", "beta_0.5", "beta_4", "lite"]
 # ------------------------------------------------------------------ #
 
 def _load_metrics(exp_name: str) -> Optional[dict]:
-    """Load eval_metrics.json for one experiment.
-
-    Returns the dict on success, or None with a warning on failure.
-    """
+    """Load eval_metrics.json for one experiment, or return None."""
     path = OUTPUTS_DIR / exp_name / "eval_metrics.json"
     if not path.exists():
         print(f"  [compare] SKIP  {exp_name}: eval_metrics.json not found ({path})")
@@ -87,81 +83,65 @@ def _load_image(path: Path) -> Optional[np.ndarray]:
 
 
 def _placeholder_axes(ax: plt.Axes, message: str) -> None:
-    """Fill an axes with a grey box and a centred message."""
+    """Fill an axes with a grey box and centred message."""
     ax.set_facecolor("#cccccc")
     ax.text(
         0.5, 0.5, message,
-        ha="center", va="center",
-        transform=ax.transAxes,
+        ha="center", va="center", transform=ax.transAxes,
         fontsize=9, color="#555555",
     )
     ax.axis("off")
 
 
 # ------------------------------------------------------------------ #
-# Beta comparison figure                                               #
+# GAN vs recon comparison figure                                       #
 # ------------------------------------------------------------------ #
 
-def _make_beta_comparison() -> None:
-    """Create a 2-row × 3-column comparison figure for the beta experiments.
+def _make_gan_vs_recon() -> None:
+    """Two-column figure: baseline (full GAN) vs recon_only (L1 only).
 
-    Row 0 — Generated samples (samples.png from each experiment)
-    Row 1 — Reconstructions  (reconstructions.png from each experiment)
-
-    Columns correspond to baseline / beta_0.5 / beta_4 in that order.
-    A higher β encourages a more regular latent space (better sample
-    diversity) but tends to blur reconstructions; this layout shows the
-    trade-off directly.
+    Each column is that experiment's inpainting.png, which already
+    contains rows of [ masked input | completion | ground truth ].
+    Because evaluate.py uses a fixed seed for mask generation and the
+    val DataLoader is deterministic (shuffle=False), both columns show
+    the same input images and the same hole patterns — making the
+    sharpness / realism difference directly attributable to the
+    adversarial loss.
     """
-    print("\n[compare] building beta_comparison.png …")
-
-    IMAGE_TYPES = [
-        ("samples.png",         "Generated samples (prior N(0,I))"),
-        ("reconstructions.png", "Reconstructions (val set, top=original / bottom=recon)"),
-    ]
-    n_rows = len(IMAGE_TYPES)
-    n_cols = len(BETA_EXPS)
+    print("\n[compare] building gan_vs_recon.png …")
 
     fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(7 * n_cols, 5 * n_rows),
+        1, len(GAN_VS_RECON_EXPS),
+        figsize=(13 * len(GAN_VS_RECON_EXPS), 14),
         squeeze=False,
     )
 
-    for col, exp_name in enumerate(BETA_EXPS):
-        for row, (img_file, row_label) in enumerate(IMAGE_TYPES):
-            ax = axes[row][col]
-            img_path = OUTPUTS_DIR / exp_name / img_file
+    for col, exp_name in enumerate(GAN_VS_RECON_EXPS):
+        ax = axes[0][col]
+        img_path = OUTPUTS_DIR / exp_name / "inpainting.png"
+        img = _load_image(img_path)
 
-            img = _load_image(img_path)
-            if img is not None:
-                ax.imshow(img)
-                ax.axis("off")
-            else:
-                _placeholder_axes(
-                    ax,
-                    f"{exp_name}\n{img_file}\nnot available",
-                )
-                print(f"  [compare] missing: {img_path}")
+        if img is not None:
+            ax.imshow(img)
+            ax.axis("off")
+        else:
+            _placeholder_axes(ax, f"{exp_name}\ninpainting.png\nnot available")
+            print(f"  [compare] missing: {img_path}")
 
-            # Column header on the top row only
-            if row == 0:
-                ax.set_title(
-                    BETA_LABELS.get(exp_name, exp_name),
-                    fontsize=12, fontweight="bold", pad=8,
-                )
-            # Row label on the left column only
-            if col == 0:
-                ax.set_ylabel(row_label, fontsize=10, labelpad=6)
+        ax.set_title(
+            GAN_VS_RECON_LABELS.get(exp_name, exp_name),
+            fontsize=13, fontweight="bold", pad=10,
+        )
 
     fig.suptitle(
-        "β-VAE comparison: effect of KL weight on generation quality",
-        fontsize=14, y=1.01,
+        "Effect of the adversarial loss on inpainting quality\n"
+        "Each panel shows:  [ masked input  |  completion  |  ground truth ]",
+        fontsize=13, y=1.01,
     )
     fig.tight_layout()
 
     COMP_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = COMP_DIR / "beta_comparison.png"
+    out_path = COMP_DIR / "gan_vs_recon.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  → {out_path}")
@@ -171,8 +151,8 @@ def _make_beta_comparison() -> None:
 # Summary markdown table                                               #
 # ------------------------------------------------------------------ #
 
-def _fmt(value, fmt=".2f", missing="—") -> str:
-    """Format a numeric value, or return a placeholder for None."""
+def _fmt(value, fmt: str = ".4f", missing: str = "—") -> str:
+    """Format a numeric value, or return a placeholder for None / missing."""
     if value is None:
         return missing
     try:
@@ -182,15 +162,7 @@ def _fmt(value, fmt=".2f", missing="—") -> str:
 
 
 def _make_summary_md() -> None:
-    """Write a markdown summary table for all experiments.
-
-    Columns: experiment, β, base_channels, n_params, val_recon,
-             val_kl, val_total, FID.
-
-    A section below the table calls out the parameter count difference
-    between the full model (base_channels=32) and the lite model
-    (base_channels=16).
-    """
+    """Write summary.md with per-experiment metrics and parameter analysis."""
     print("\n[compare] building summary.md …")
 
     rows: list[dict] = []
@@ -203,74 +175,88 @@ def _make_summary_md() -> None:
         print("  [compare] No experiment metrics found; summary.md not written.")
         return
 
-    # ---- Markdown table ------------------------------------------
+    # ---- Main metrics table --------------------------------------
     header = (
-        "| Experiment | β | base_channels | n_params"
-        " | val_recon | val_kl | val_total | FID |\n"
+        "| Experiment | base_ch | n_params_G | n_params_D"
+        " | val L1 | PSNR (dB) | SSIM | FID |\n"
         "|---|---|---|---|---|---|---|---|\n"
     )
     data_lines: list[str] = []
     for m in rows:
-        fid_str = _fmt(m.get("fid"), ".2f", "—")
+        n_g = m.get("n_params_g", 0)
+        n_d = m.get("n_params_d", 0)
         line = (
             f"| {m.get('exp_name', '?')} "
-            f"| {_fmt(m.get('beta'), '.1f')} "
             f"| {m.get('base_channels', '?')} "
-            f"| {m.get('n_params', 0):,} "
-            f"| {_fmt(m.get('final_val_recon'), '.2f')} "
-            f"| {_fmt(m.get('final_val_kl'), '.2f')} "
-            f"| {_fmt(m.get('final_val_total'), '.2f')} "
-            f"| {fid_str} |"
+            f"| {n_g:,} "
+            f"| {n_d:,} "
+            f"| {_fmt(m.get('val_l1'),  '.4f')} "
+            f"| {_fmt(m.get('psnr_db'), '.2f')} "
+            f"| {_fmt(m.get('ssim'),    '.4f')} "
+            f"| {_fmt(m.get('fid'),     '.1f')} |"
         )
         data_lines.append(line)
 
-    # ---- Parameter count note ------------------------------------
-    full_params = next(
-        (m.get("n_params") for m in rows if m.get("base_channels", 0) == 32),
+    # ---- Full vs lite parameter comparison -----------------------
+    # Use the first full-size experiment available (baseline preferred).
+    full_m = next(
+        (m for m in rows if m.get("exp_name") in ("baseline", "recon_only")),
         None,
     )
-    lite_params = next(
-        (m.get("n_params") for m in rows if m.get("exp_name") == "lite"),
-        None,
-    )
-    if full_params and lite_params:
-        reduction_pct = 100.0 * (full_params - lite_params) / full_params
+    lite_m = next((m for m in rows if m.get("exp_name") == "lite"), None)
+
+    if full_m and lite_m:
+        full_g = full_m.get("n_params_g", 0)
+        full_d = full_m.get("n_params_d", 0)
+        lite_g = lite_m.get("n_params_g", 0)
+        lite_d = lite_m.get("n_params_d", 0)
+        full_total = full_g + full_d
+        lite_total = lite_g + lite_d
+        pct = 100.0 * (full_total - lite_total) / full_total if full_total else 0.0
         param_note = (
-            "\n## Parameter count comparison\n\n"
-            f"| Model | base_channels | n_params |\n"
-            f"|---|---|---|\n"
-            f"| Full (baseline / beta_0.5 / beta_4) | 32 | **{full_params:,}** |\n"
-            f"| Lite | 16 | **{lite_params:,}** |\n\n"
-            f"The lite model uses **{full_params - lite_params:,}** fewer parameters "
-            f"(**{reduction_pct:.1f}%** reduction).\n"
+            "\n## Parameter count: full vs lite\n\n"
+            f"| Model | base_channels | n_params_G | n_params_D | Total |\n"
+            f"|---|---|---|---|---|\n"
+            f"| Full ({full_m.get('exp_name')}) "
+            f"| {full_m.get('base_channels', '?')} "
+            f"| **{full_g:,}** | **{full_d:,}** | **{full_total:,}** |\n"
+            f"| Lite "
+            f"| {lite_m.get('base_channels', '?')} "
+            f"| **{lite_g:,}** | **{lite_d:,}** | **{lite_total:,}** |\n\n"
+            f"Lite reduces total parameters by **{full_total - lite_total:,}**"
+            f" (**{pct:.1f}%** reduction).\n"
         )
     else:
-        param_note = "\n*(Parameter comparison unavailable — run baseline and lite experiments first.)*\n"
+        param_note = (
+            "\n*(Parameter comparison unavailable — "
+            "run baseline and lite first.)*\n"
+        )
 
-    # ---- Beta observation note -----------------------------------
-    beta_note = (
-        "\n## Effect of β on reconstruction vs latent structure\n\n"
-        "- **β < 1** (beta_0.5): lower KL weight → less regularisation "
-        "→ sharper reconstructions, but the latent space may be less smooth "
-        "and prior samples may look less realistic.\n"
-        "- **β = 1** (baseline): standard VAE balance.\n"
-        "- **β > 1** (beta_4): stronger KL pressure → latent codes cluster "
-        "closer to N(0,I) → more coherent prior samples, but reconstructions "
-        "tend to be blurrier (information is squeezed out by the KL term).\n\n"
-        "See `outputs/comparison/beta_comparison.png` for a visual comparison.\n"
+    # ---- Adversarial ablation discussion -------------------------
+    adv_note = (
+        "\n## Effect of the adversarial loss (baseline vs recon_only)\n\n"
+        "- **recon_only** (`lambda_adv = 0`): generator trained with L1 only.\n"
+        "  L1 minimises the expected pixel-wise error, which averages over all\n"
+        "  plausible completions and produces blurry, low-frequency fills with\n"
+        "  no sharp edges or texture.\n"
+        "- **baseline** (`lambda_adv = 1`): full GAN.  The discriminator penalises\n"
+        "  completions that do not lie on the manifold of real images, pushing\n"
+        "  the generator toward sharper textures and more realistic fills —\n"
+        "  at the potential cost of slightly higher L1 (the discriminator\n"
+        "  rewards realism over pixel accuracy).\n\n"
+        "See `outputs/comparison/gan_vs_recon.png` for a visual comparison.\n"
     )
 
-    # ---- Assemble and write --------------------------------------
+    # ---- Write ---------------------------------------------------
     COMP_DIR.mkdir(parents=True, exist_ok=True)
     out_path = COMP_DIR / "summary.md"
-
     with open(out_path, "w") as f:
         f.write("# Experiment Summary\n\n")
         f.write(header)
         f.write("\n".join(data_lines))
         f.write("\n")
         f.write(param_note)
-        f.write(beta_note)
+        f.write(adv_note)
 
     print(f"  → {out_path}")
     print(f"  Experiments summarised: {[m.get('exp_name') for m in rows]}")
@@ -286,7 +272,7 @@ def main() -> None:
     print("[compare] Comparing experiments under outputs/")
     print(f"{'='*60}")
 
-    _make_beta_comparison()
+    _make_gan_vs_recon()
     _make_summary_md()
 
     print(f"\n[compare] Done.  Outputs in {COMP_DIR}\n")
