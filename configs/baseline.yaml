@@ -1,19 +1,25 @@
-exp_name: baseline
+exp_name: baseline          # determines outputs/ subdirectory
 seed: 42
-data_dir: data/coco2017    # contains train2017/ and val2017/ flat image directories
+data_dir: data/coco2017     # contains train2017/ and val2017/ flat image dirs
 image_size: 256
-batch_size: 32             # reduced from 128 due to 256×256 memory cost
+batch_size: 32
 num_workers: 4
 
-latent_dim: 1024
-base_channels: 32          # Change to 16 for lite config
-beta: 1.0
-kl_anneal_epochs: 10       # Anneal KL over first 10 epochs to stabilize early training
+base_channels: 32           # base channels for BOTH generator and discriminator
+bottleneck_dim: 1024        # generator bottleneck dimension (deterministic, NOT a sampled latent)
+
+lambda_rec: 100.0           # weight on L1 reconstruction loss
+lambda_adv: 1.0             # weight on adversarial loss
+adv_warmup_epochs: 5        # train recon-only for first N epochs, then enable adversarial
+
+mask_min_ratio: 0.25        # min hole side length as fraction of image_size
+mask_max_ratio: 0.5         # max hole side length as fraction of image_size
 
 epochs: 100
-lr: 0.001
-use_amp: true              # Whether to use mixed precision
+lr_g: 0.0002                # generator learning rate
+lr_d: 0.0002                # discriminator learning rate
+beta1: 0.5                  # Adam beta1 (standard for GAN training)
+use_amp: true               # mixed precision
 
-num_samples: 64            # Number of samples to generate during evaluation
-num_interpolations: 8      # Number of interpolation sequences
-compute_fid: false         # Whether to compute FID (optional, requires torchmetrics)
+num_vis: 16                 # number of inpainting examples to visualize
+compute_fid: false          # optional FID (requires torchmetrics)

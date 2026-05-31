@@ -1,0 +1,25 @@
+exp_name: recon_only        # generator trained with L1 only — no adversarial loss
+seed: 42
+data_dir: data/coco2017
+image_size: 256
+batch_size: 32
+num_workers: 4
+
+base_channels: 32
+bottleneck_dim: 1024
+
+lambda_rec: 100.0
+lambda_adv: 0.0             # adversarial loss disabled; discriminator is never updated
+adv_warmup_epochs: 5        # irrelevant when lambda_adv=0, kept for config consistency
+
+mask_min_ratio: 0.25
+mask_max_ratio: 0.5
+
+epochs: 100
+lr_g: 0.0002
+lr_d: 0.0002
+beta1: 0.5
+use_amp: true
+
+num_vis: 16
+compute_fid: false

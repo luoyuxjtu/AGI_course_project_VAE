@@ -1,30 +1,49 @@
 """
-Data loading for the VAE project — COCO 2017 edition.
+Data loading and masking for the GAN inpainting project — COCO 2017 edition.
 
 COCO 2017 stores images in flat directories (train2017/*.jpg,
-val2017/*.jpg) with no class subdirectories.  Because VAE training is
-fully unsupervised we don't need labels or annotations at all —
+val2017/*.jpg) with no class subdirectories.  Because GAN inpainting
+training is unsupervised we don't need labels or annotations at all —
 we just load every JPEG in the directory.
 
 The custom CocoImageDataset class handles this flat layout.  It returns
-(image_tensor, 0) from __getitem__ so that the existing DataLoader loops
-in train.py and evaluate.py (which unpack `for x, _ in loader`) work
-without modification; the 0 is a dummy label that is never used.
+(image_tensor, 0) from __getitem__; the 0 is a dummy label kept for
+DataLoader API compatibility and never used by the training loop.
 
 Image pipeline
 --------------
 Train:  Resize(image_size) → CenterCrop(image_size) → RandomHorizontalFlip → ToTensor
 Val:    Resize(image_size) → CenterCrop(image_size) → ToTensor
 
-Output range is [0, 1] with no further normalisation — the decoder uses
-Sigmoid, so both the reconstruction target and the prediction live in [0, 1].
+Output range is [0, 1] with no further normalisation — the generator
+output is Sigmoid, so both target and prediction live in [0, 1].
+
+Masking
+-------
+Masks are NOT baked into the dataset; they are generated fresh each batch
+inside the training / evaluation loop so that every image sees a different
+hole in every epoch (better generalisation).
+
+Mask convention (used throughout this project):
+  mask == 1  →  hole / missing region  (generator must fill this)
+  mask == 0  →  known pixel           (copy through as-is)
+
+Helper functions
+----------------
+generate_mask(image_size, min_ratio, max_ratio)
+    Returns a (1, H, W) binary float tensor with a random rectangular hole.
+
+make_masked_image(x, mask)
+    Returns x_masked = x * (1 - mask), zeroing out the hole pixels.
 """
 
 import glob
 import os
+import random
 from types import SimpleNamespace
 from typing import Tuple
 
+import torch
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
@@ -132,3 +151,69 @@ def get_dataloaders(cfg: SimpleNamespace) -> Tuple[DataLoader, DataLoader]:
     )
 
     return train_loader, val_loader
+
+
+# ------------------------------------------------------------------ #
+# Masking utilities                                                    #
+# ------------------------------------------------------------------ #
+
+def generate_mask(
+    image_size: int,
+    min_ratio: float,
+    max_ratio: float,
+) -> Tensor:
+    """Generate a single random rectangular binary mask.
+
+    The hole side lengths are drawn uniformly from
+    [min_ratio * image_size, max_ratio * image_size], and placed at a
+    uniformly random valid position.
+
+    Convention: mask == 1 marks the **missing / hole** region that the
+    generator must fill in.  mask == 0 marks known pixels that are
+    copied through unchanged.
+
+    Args:
+        image_size: Square image side length (pixels).
+        min_ratio:  Minimum hole side length as a fraction of image_size.
+        max_ratio:  Maximum hole side length as a fraction of image_size.
+
+    Returns:
+        mask: Float tensor of shape (1, image_size, image_size),
+              values in {0.0, 1.0}.
+    """
+    mask = torch.zeros(1, image_size, image_size, dtype=torch.float32)
+
+    min_len = max(1, int(min_ratio * image_size))
+    max_len = max(min_len, int(max_ratio * image_size))
+
+    h = random.randint(min_len, max_len)
+    w = random.randint(min_len, max_len)
+
+    # Clamp so the rectangle always fits inside the image.
+    top  = random.randint(0, image_size - h)
+    left = random.randint(0, image_size - w)
+
+    # Mark the hole region as 1 (= missing, to be filled by the generator).
+    mask[0, top : top + h, left : left + w] = 1.0
+    return mask
+
+
+def make_masked_image(x: Tensor, mask: Tensor) -> Tensor:
+    """Zero out the hole region of an image using the mask.
+
+    Computes  x_masked = x * (1 - mask).
+
+    Known pixels (mask == 0) are kept unchanged.
+    Hole pixels  (mask == 1) are set to 0.
+
+    Works on a single image (C, H, W) or a batch (B, C, H, W) provided
+    that `mask` is broadcastable (e.g. (1, H, W) or (B, 1, H, W)).
+
+    Args:
+        x:    Image tensor, values in [0, 1].
+        mask: Binary mask tensor, 1 = hole, 0 = known.
+
+    Returns:
+        x_masked: Same shape as `x`, hole pixels zeroed.
+    """
+    return x * (1.0 - mask)
