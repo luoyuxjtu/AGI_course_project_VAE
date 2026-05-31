@@ -117,6 +117,13 @@ def load_checkpoint(
         Dict with keys ``epoch`` (int) and ``best_val_loss`` (float).
     """
     payload = torch.load(path, map_location="cpu")
+    if "generator_state" not in payload:
+        raise ValueError(
+            f"Checkpoint '{path}' is missing key 'generator_state'.\n"
+            "It was probably saved by the old VAE code (key 'model_state').\n"
+            "Delete it so training can start fresh:\n"
+            f"  rm {path}"
+        )
     generator.load_state_dict(payload["generator_state"])
     if discriminator is not None and "discriminator_state" in payload:
         discriminator.load_state_dict(payload["discriminator_state"])

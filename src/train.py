@@ -261,16 +261,26 @@ def main(cfg=None) -> None:
 
     ckpt_path = out_dir / "last.pt"
     if ckpt_path.exists():
-        ckpt = load_checkpoint(
-            ckpt_path, G, D, opt_g, opt_d, scaler_g, scaler_d
-        )
-        start_epoch    = ckpt["epoch"] + 1
-        best_val_loss  = ckpt["best_val_loss"]
-        print(
-            f"[train] Resumed from {ckpt_path}  "
-            f"(epoch {ckpt['epoch'] + 1}/{cfg.epochs}, "
-            f"best_val_l1={best_val_loss:.6f})"
-        )
+        try:
+            ckpt = load_checkpoint(
+                ckpt_path, G, D, opt_g, opt_d, scaler_g, scaler_d
+            )
+            start_epoch   = ckpt["epoch"] + 1
+            best_val_loss = ckpt["best_val_loss"]
+            print(
+                f"[train] Resumed from {ckpt_path}  "
+                f"(epoch {ckpt['epoch'] + 1}/{cfg.epochs}, "
+                f"best_val_l1={best_val_loss:.6f})"
+            )
+        except (KeyError, ValueError, RuntimeError) as exc:
+            # Checkpoint exists but cannot be loaded — most likely it was
+            # saved by the old VAE code and has an incompatible format.
+            # Warn and start fresh rather than crashing.
+            print(
+                f"[train] WARNING: ignoring incompatible checkpoint "
+                f"({type(exc).__name__}: {exc})\n"
+                f"[train] Starting from epoch 1."
+            )
 
     if start_epoch >= cfg.epochs:
         print(f"[train] Training already complete ({cfg.epochs} epochs done).")
