@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Run all three GAN inpainting experiments sequentially, then compare.
+# Run all three GAN inpainting experiments in parallel (one GPU each),
+# then run the comparison analysis once all experiments finish.
 #
 # Run from the project root:
 #   bash scripts/run_all.sh
 #
-# Each `src.train` call automatically invokes `src.evaluate` after
-# training, so one command covers:
+# GPU assignment — edit the three lines below to match your server:
+GPU_BASELINE=0
+GPU_RECON_ONLY=1
+GPU_LITE=2
 #
-#   train baseline   → eval baseline   (inpainting.png, loss_curve.png, eval_metrics.json)
-#   train recon_only → eval recon_only
-#   train lite       → eval lite
-#   python -m src.compare              (gan_vs_recon.png, summary.md)
+# Each experiment is fully independent (separate outputs/, separate config),
+# so running them concurrently on different GPUs is safe.
 #
-# Stdout + stderr for each experiment are tee'd to outputs/<exp>/train.log
-# so you can monitor progress in another terminal:
-#
+# Stdout+stderr are tee'd to outputs/<exp>/train.log for live monitoring:
 #   tail -f outputs/baseline/train.log
 #
-# Interrupted runs resume automatically from the last saved checkpoint.
+# Interrupted experiments resume automatically from their last checkpoint
+# when this script is re-run.
 
 set -uo pipefail
 
@@ -26,35 +26,61 @@ total_start=$(date +%s)
 mkdir -p outputs/baseline outputs/recon_only outputs/lite
 
 echo "================================================================"
-echo "  GAN inpainting — running 3 experiments sequentially"
+echo "  GAN inpainting — launching 3 experiments in parallel"
+echo "  GPU assignments: baseline=$GPU_BASELINE  recon_only=$GPU_RECON_ONLY  lite=$GPU_LITE"
 echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "================================================================"
 echo ""
 
-run_exp() {
-    local config="$1"
-    local exp="$2"
-    local log="outputs/${exp}/train.log"
+# Launch each experiment on its assigned GPU and capture the PID.
+CUDA_VISIBLE_DEVICES=$GPU_BASELINE \
+    python -m src.train --config configs/baseline.yaml \
+    2>&1 | tee outputs/baseline/train.log &
+PID_BASELINE=$!
 
-    echo "----------------------------------------------------------------"
-    echo "  Starting: $exp  (config: $config)"
-    echo "  Log: $log"
-    echo "  $(date '+%H:%M:%S')"
-    echo "----------------------------------------------------------------"
+CUDA_VISIBLE_DEVICES=$GPU_RECON_ONLY \
+    python -m src.train --config configs/recon_only.yaml \
+    2>&1 | tee outputs/recon_only/train.log &
+PID_RECON_ONLY=$!
 
-    if python -m src.train --config "$config" 2>&1 | tee "$log"; then
-        echo "  ✓ $exp complete"
+CUDA_VISIBLE_DEVICES=$GPU_LITE \
+    python -m src.train --config configs/lite.yaml \
+    2>&1 | tee outputs/lite/train.log &
+PID_LITE=$!
+
+echo "  [GPU $GPU_BASELINE]     baseline   PID=$PID_BASELINE    → outputs/baseline/train.log"
+echo "  [GPU $GPU_RECON_ONLY]     recon_only PID=$PID_RECON_ONLY  → outputs/recon_only/train.log"
+echo "  [GPU $GPU_LITE]     lite       PID=$PID_LITE       → outputs/lite/train.log"
+echo ""
+echo "Waiting for all experiments to finish ..."
+echo "(run  tail -f outputs/<exp>/train.log  in another terminal to monitor)"
+echo ""
+
+# Wait for each experiment and report pass/fail individually.
+FAILED=0
+
+declare -A NAMES=([0]="baseline" [1]="recon_only" [2]="lite")
+declare -A PIDS=([0]=$PID_BASELINE [1]=$PID_RECON_ONLY [2]=$PID_LITE)
+declare -A GPUS=([0]=$GPU_BASELINE [1]=$GPU_RECON_ONLY [2]=$GPU_LITE)
+
+for i in 0 1 2; do
+    exp="${NAMES[$i]}"
+    gpu="${GPUS[$i]}"
+    if wait "${PIDS[$i]}"; then
+        echo "  ✓  [GPU $gpu] $exp — done"
     else
-        echo "  ✗ $exp FAILED — see $log" >&2
-        exit 1
+        echo "  ✗  [GPU $gpu] $exp — FAILED  (see outputs/$exp/train.log)" >&2
+        FAILED=1
     fi
+done
+
+if [ $FAILED -ne 0 ]; then
     echo ""
-}
+    echo "ERROR: one or more experiments failed; skipping comparison." >&2
+    exit 1
+fi
 
-run_exp configs/baseline.yaml   baseline
-run_exp configs/recon_only.yaml recon_only
-run_exp configs/lite.yaml       lite
-
+echo ""
 echo "================================================================"
 echo "  Comparison analysis"
 echo "================================================================"
@@ -65,6 +91,6 @@ echo ""
 echo "================================================================"
 echo "  All done in ${total_elapsed}s"
 echo "  Outputs:"
-echo "    outputs/baseline/     outputs/recon_only/   outputs/lite/"
-echo "    outputs/comparison/   (gan_vs_recon.png + summary.md)"
+echo "    outputs/baseline/      outputs/recon_only/   outputs/lite/"
+echo "    outputs/comparison/    (gan_vs_recon.png + summary.md)"
 echo "================================================================"
