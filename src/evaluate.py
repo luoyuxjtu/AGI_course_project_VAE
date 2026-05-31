@@ -1,17 +1,17 @@
 """
-Evaluation pipeline for the VAE project.
+Evaluation pipeline for the GAN inpainting project.
 
 Loads outputs/{exp_name}/best.pt and writes to the same directory:
 
-  samples.png         — images sampled from the prior N(0, I)
-  reconstructions.png — val-set originals (top) vs reconstructions (bottom)
-  interpolations.png  — latent-space linear interpolation sequences
-  loss_curve.png      — train / val loss curves read from metrics.json
-  eval_metrics.json   — final losses, parameter count, optional FID
+  inpainting.png    — num_vis rows of [masked_input | completed | ground_truth]
+                      on validation-set images with a *fixed-seed* mask pattern
+                      so all experiments are visualised on identical holes.
+  loss_curve.png    — d_loss, g_adv, g_recon, val_l1 vs epoch (metrics.json).
+  eval_metrics.json — val L1, PSNR, SSIM, G/D parameter counts, optional FID.
 
-The per-epoch training log (metrics.json) is written by train.py and is
-NOT modified here; eval_metrics.json is a separate flat summary used by
-compare.py.
+Note: prior-sample grids and latent-space interpolations are NOT produced
+here — this is a deterministic conditional generator with no prior to sample
+from and no latent space to interpolate in.
 
 Usage (standalone)
 ------------------
@@ -24,169 +24,140 @@ Called from train.py
 """
 
 import json
+import math
+import random
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")   # non-interactive backend; safe on headless GPU servers
 import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 
 from src.config import load_config
-from src.dataset import get_dataloaders
-from src.losses import elbo_loss
-from src.model import build_model
+from src.dataset import generate_mask, get_dataloaders, make_masked_image
+from src.model import Generator, build_discriminator, build_generator
 from src.utils import load_checkpoint, save_image_grid
 
 
 # ------------------------------------------------------------------ #
-# 1. Prior samples                                                     #
+# 1. Inpainting visualisation                                          #
 # ------------------------------------------------------------------ #
 
 @torch.no_grad()
-def _generate_samples(
-    model: torch.nn.Module,
-    cfg,
-    device: torch.device,
-    out_dir: Path,
-) -> None:
-    """Sample z ~ N(0,I), decode, and save as an image grid."""
-    print("[evaluate] generating samples …")
-    samples = model.sample(cfg.num_samples, device=device)  # (N, C, H, W)
-    save_image_grid(samples, out_dir / "samples.png", nrow=8)
-    print(f"  → {out_dir / 'samples.png'}")
-
-
-# ------------------------------------------------------------------ #
-# 2. Reconstructions                                                   #
-# ------------------------------------------------------------------ #
-
-@torch.no_grad()
-def _generate_reconstructions(
-    model: torch.nn.Module,
+def _visualize_inpainting(
+    G: torch.nn.Module,
     val_loader: torch.utils.data.DataLoader,
     cfg,
     device: torch.device,
     out_dir: Path,
 ) -> None:
-    """Show one val batch: originals (top row) vs reconstructions (bottom)."""
-    print("[evaluate] generating reconstructions …")
-    n_show = min(cfg.batch_size, 8)
+    """Save a cfg.num_vis-row triplet grid to inpainting.png.
 
-    x, _ = next(iter(val_loader))
-    x = x[:n_show].to(device)
+    Each row is:  [ masked input  |  G completion  |  ground truth ]
 
-    # Use the posterior mean for reconstruction — avoids reparameterisation
-    # noise so the visual comparison is deterministic and easy to read.
-    mu, _ = model.encode(x)
-    x_recon = model.decode(mu)
+    Masks are generated with a *fixed seed* (cfg.seed) so that every
+    experiment produces images with identical holes — making the visual
+    comparison between experiments fair and direct.
 
-    # cat along batch dim: first n_show = originals, next n_show = recons
-    grid = torch.cat([x.cpu(), x_recon.cpu()], dim=0)
-    save_image_grid(grid, out_dir / "reconstructions.png", nrow=n_show)
-    print(f"  → {out_dir / 'reconstructions.png'}")
-
-
-# ------------------------------------------------------------------ #
-# 3. Latent-space interpolations                                       #
-# ------------------------------------------------------------------ #
-
-@torch.no_grad()
-def _generate_interpolations(
-    model: torch.nn.Module,
-    val_loader: torch.utils.data.DataLoader,
-    cfg,
-    device: torch.device,
-    out_dir: Path,
-) -> None:
-    """Linear interpolation between latent means of image pairs.
-
-    Each row in the output grid is one interpolation sequence (left
-    endpoint → right endpoint in n_steps steps).
+    Args:
+        G:          Generator in eval mode.
+        val_loader: Validation DataLoader.
+        cfg:        Config namespace.
+        device:     Target device.
+        out_dir:    Output directory.
     """
-    print("[evaluate] generating interpolations …")
-    n_steps = 8          # interpolation steps per row, including both endpoints
-    n_pairs = cfg.num_interpolations
+    print("[evaluate] generating inpainting visualisation …")
+    G.eval()
 
-    # Collect enough images from the val set (2 images per pair)
-    needed = n_pairs * 2
-    collected: list[torch.Tensor] = []
-    for x, _ in val_loader:
-        collected.append(x)
-        if sum(t.size(0) for t in collected) >= needed:
+    num_vis = cfg.num_vis
+
+    # Collect num_vis images from the validation set.
+    batches: list[torch.Tensor] = []
+    for x_real, _ in val_loader:
+        batches.append(x_real)
+        if sum(t.size(0) for t in batches) >= num_vis:
             break
-    images = torch.cat(collected, dim=0)[:needed]  # (needed, C, H, W)
+    x_real = torch.cat(batches, dim=0)[:num_vis]   # (num_vis, 3, H, W)
 
-    rows: list[torch.Tensor] = []
-    for i in range(n_pairs):
-        x_a = images[2 * i].unsqueeze(0).to(device)      # (1, C, H, W)
-        x_b = images[2 * i + 1].unsqueeze(0).to(device)
+    # Fixed-seed mask generation for reproducibility across experiments.
+    rng_state = random.getstate()
+    random.seed(cfg.seed)
+    masks = torch.stack(
+        [generate_mask(cfg.image_size, cfg.mask_min_ratio, cfg.mask_max_ratio)
+         for _ in range(num_vis)]
+    )                                               # (num_vis, 1, H, W)
+    random.setstate(rng_state)                     # restore caller's RNG state
 
-        # Interpolate between posterior means; using means (not samples)
-        # produces smoother sequences because there is no stochastic jitter.
-        mu_a, _ = model.encode(x_a)
-        mu_b, _ = model.encode(x_b)
+    x_real   = x_real.to(device)
+    masks    = masks.to(device)
+    x_masked = make_masked_image(x_real, masks)
 
-        step_imgs: list[torch.Tensor] = []
-        for step in range(n_steps):
-            alpha = step / (n_steps - 1)                 # 0.0 … 1.0
-            z = (1.0 - alpha) * mu_a + alpha * mu_b
-            step_imgs.append(model.decode(z).cpu())      # (1, C, H, W)
+    G_out       = G(x_masked, masks)
+    x_completed = Generator.complete(x_masked, masks, G_out)
 
-        rows.append(torch.cat(step_imgs, dim=0))         # (n_steps, C, H, W)
+    # Interleave triplets so make_grid with nrow=3 produces one row per image:
+    #   col 0 = masked input,  col 1 = completion,  col 2 = ground truth
+    triplets: list[torch.Tensor] = []
+    for i in range(num_vis):
+        triplets.extend([
+            x_masked[i].cpu(),
+            x_completed[i].cpu(),
+            x_real[i].cpu(),
+        ])
 
-    # nrow=n_steps keeps each interpolation sequence on its own row
-    all_imgs = torch.cat(rows, dim=0)                    # (n_pairs*n_steps, C, H, W)
-    save_image_grid(all_imgs, out_dir / "interpolations.png", nrow=n_steps)
-    print(f"  → {out_dir / 'interpolations.png'}")
+    # (num_vis * 3, 3, H, W) with nrow=3 → num_vis rows of 3 columns each
+    save_image_grid(torch.stack(triplets), out_dir / "inpainting.png", nrow=3)
+    print(f"  → {out_dir / 'inpainting.png'}")
 
 
 # ------------------------------------------------------------------ #
-# 4. Loss curves                                                       #
+# 2. Loss curves                                                       #
 # ------------------------------------------------------------------ #
 
 def _plot_loss_curves(out_dir: Path) -> None:
-    """Read metrics.json and draw train / val loss curves."""
+    """Read metrics.json and draw the four GAN training curves."""
     print("[evaluate] plotting loss curves …")
 
     log_path = out_dir / "metrics.json"
     if not log_path.exists():
-        print(f"  metrics.json not found at {log_path}; skipping loss curve.")
+        print(f"  metrics.json not found at {log_path}; skipping.")
         return
 
     try:
         with open(log_path) as f:
             records = json.load(f)
     except Exception as exc:
-        print(f"  Could not read metrics.json ({exc!r}); skipping loss curve.")
+        print(f"  Could not read metrics.json ({exc!r}); skipping.")
         return
 
-    # Keep only per-epoch records (dicts that carry all expected keys)
-    required = {"epoch", "train_total", "val_total", "train_recon",
-                "val_recon", "train_kl", "val_kl"}
+    required = {"epoch", "d_loss", "g_adv", "g_recon", "val_l1"}
     records = [r for r in records if required.issubset(r.keys())]
     if not records:
-        print("  No epoch records found in metrics.json; skipping loss curve.")
+        print("  No epoch records in metrics.json; skipping.")
         return
 
-    epochs = [r["epoch"] + 1 for r in records]   # display as 1-indexed
+    epochs = [r["epoch"] + 1 for r in records]
 
+    # Three panels: D loss / G adversarial loss / G recon + val L1
     panels = [
-        ("train_total",  "val_total",  "Total loss"),
-        ("train_recon",  "val_recon",  "Reconstruction loss"),
-        ("train_kl",     "val_kl",     "KL divergence"),
+        ("d_loss",  None,     "Discriminator loss"),
+        ("g_adv",   None,     "Generator adversarial loss"),
+        ("g_recon", "val_l1", "G recon L1 (train) & val L1"),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     for ax, (tr_key, va_key, title) in zip(axes, panels):
-        ax.plot(epochs, [r[tr_key] for r in records], label="train")
-        ax.plot(epochs, [r[va_key] for r in records],
-                label="val", linestyle="--")
+        ax.plot(epochs, [r[tr_key] for r in records], label=tr_key)
+        if va_key is not None:
+            ax.plot(epochs, [r[va_key] for r in records],
+                    label=va_key, linestyle="--")
         ax.set_title(title)
         ax.set_xlabel("Epoch")
         ax.legend()
         ax.grid(alpha=0.3)
 
-    fig.suptitle(f"Loss curves — {out_dir.name}", fontsize=13)
+    fig.suptitle(f"GAN training curves — {out_dir.name}", fontsize=13)
     fig.tight_layout()
     fig.savefig(out_dir / "loss_curve.png", dpi=150)
     plt.close(fig)
@@ -194,104 +165,159 @@ def _plot_loss_curves(out_dir: Path) -> None:
 
 
 # ------------------------------------------------------------------ #
-# 5. Final metrics + FID                                              #
+# 3. Quantitative metrics                                              #
 # ------------------------------------------------------------------ #
 
+def _psnr_from_mse(mse: float) -> float:
+    """PSNR in dB for [0, 1]-range images.  Returns inf when MSE == 0."""
+    if mse <= 0.0:
+        return float("inf")
+    return -10.0 * math.log10(mse)
+
+
 @torch.no_grad()
-def _compute_final_val_losses(
-    model: torch.nn.Module,
+def _compute_metrics_pass(
+    G: torch.nn.Module,
     val_loader: torch.utils.data.DataLoader,
     device: torch.device,
-    beta: float,
-) -> tuple[float, float, float]:
-    """Full validation pass; returns (avg_recon, avg_kl, avg_total)."""
-    model.eval()
-    sum_r = sum_k = sum_t = 0.0
-    n = 0
-    for x, _ in val_loader:
-        x = x.to(device)
-        x_recon, mu, logvar = model(x)
-        recon, kl, total = elbo_loss(x_recon, x, mu, logvar, beta)
-        sum_r += recon.item()
-        sum_k += kl.item()
-        sum_t += total.item()
-        n += 1
-    return sum_r / n, sum_k / n, sum_t / n
-
-
-@torch.no_grad()
-def _try_compute_fid(
-    model: torch.nn.Module,
-    val_loader: torch.utils.data.DataLoader,
     cfg,
-    device: torch.device,
-) -> "float | None":
-    """Compute FID between val images and generated samples.
+) -> dict:
+    """Full val-set pass; returns L1, PSNR, SSIM using torchmetrics when
+    available, falling back to a simple PSNR on import failure.
 
-    Returns the FID score, or None on any failure.  All exceptions are
-    caught here so that a missing torchmetrics install or an OOM on a
-    small GPU never breaks the evaluation pipeline.
+    Masks are drawn randomly (same distribution as training) so the
+    numbers represent an average over the full mask distribution.
+    """
+    G.eval()
+
+    # Try to set up torchmetrics PSNR + SSIM.
+    tm_psnr = tm_ssim = None
+    try:
+        from torchmetrics.image import (
+            PeakSignalNoiseRatio,
+            StructuralSimilarityIndexMeasure,
+        )
+        tm_psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
+        tm_ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    except Exception:
+        pass  # fall back to manual PSNR below
+
+    sum_l1 = 0.0
+    sum_mse = 0.0
+    n_batches = 0
+
+    for x_real, _ in val_loader:
+        x_real = x_real.to(device)
+        B = x_real.size(0)
+
+        masks = torch.stack(
+            [generate_mask(cfg.image_size, cfg.mask_min_ratio, cfg.mask_max_ratio)
+             for _ in range(B)]
+        ).to(device)
+        x_masked    = make_masked_image(x_real, masks)
+        G_out       = G(x_masked, masks)
+        x_completed = Generator.complete(x_masked, masks, G_out)
+
+        sum_l1  += F.l1_loss(x_completed, x_real).item()
+        sum_mse += F.mse_loss(x_completed, x_real).item()
+        n_batches += 1
+
+        if tm_psnr is not None:
+            tm_psnr.update(x_completed, x_real)
+            tm_ssim.update(x_completed, x_real)
+
+    avg_l1  = sum_l1  / n_batches
+    avg_mse = sum_mse / n_batches
+
+    if tm_psnr is not None:
+        try:
+            psnr = tm_psnr.compute().item()
+            ssim = tm_ssim.compute().item()
+            print(f"  PSNR: {psnr:.2f} dB   SSIM: {ssim:.4f}  (torchmetrics)")
+        except Exception as exc:
+            print(f"  torchmetrics compute failed ({exc!r}); using simple PSNR.")
+            psnr = _psnr_from_mse(avg_mse)
+            ssim = None
+    else:
+        psnr = _psnr_from_mse(avg_mse)
+        ssim = None
+        print(f"  PSNR: {psnr:.2f} dB  (simple, torchmetrics not available)")
+
+    return {"val_l1": avg_l1, "psnr": psnr, "ssim": ssim}
+
+
+@torch.no_grad()
+def _try_fid(
+    G: torch.nn.Module,
+    val_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    cfg,
+) -> "float | None":
+    """Compute FID between val originals and completions.
+
+    Returns the score, or None on any failure (missing torchmetrics,
+    OOM, etc.).  Wrapped in try/except so the pipeline never breaks.
     """
     try:
         from torchmetrics.image.fid import FrechetInceptionDistance
 
-        # normalize=True: accepts float tensors in [0, 1] directly
-        fid_metric = FrechetInceptionDistance(
-            feature=2048, normalize=True
-        ).to(device)
+        fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
 
-        # Feed the full val set as real images
-        for x, _ in val_loader:
-            fid_metric.update(x.to(device), real=True)
+        for x_real, _ in val_loader:
+            x_real = x_real.to(device)
+            B = x_real.size(0)
+            masks = torch.stack(
+                [generate_mask(cfg.image_size, cfg.mask_min_ratio, cfg.mask_max_ratio)
+                 for _ in range(B)]
+            ).to(device)
+            x_masked    = make_masked_image(x_real, masks)
+            G_out       = G(x_masked, masks)
+            x_completed = Generator.complete(x_masked, masks, G_out)
 
-        # Generate fake images to match the size of the val set
-        n_real = len(val_loader.dataset)
-        generated = 0
-        while generated < n_real:
-            n_batch = min(cfg.batch_size, n_real - generated)
-            fake = model.sample(n_batch, device=device)
-            fid_metric.update(fake, real=False)
-            generated += n_batch
+            fid.update(x_real,      real=True)
+            fid.update(x_completed, real=False)
 
-        score = fid_metric.compute().item()
+        score = fid.compute().item()
         print(f"  FID: {score:.2f}")
         return score
 
     except Exception as exc:
-        print(f"  [evaluate] FID computation skipped ({exc!r}).")
+        print(f"  [evaluate] FID skipped ({exc!r}).")
         return None
 
 
 def _write_eval_metrics(
-    model: torch.nn.Module,
+    G: torch.nn.Module,
+    D: torch.nn.Module,
     val_loader: torch.utils.data.DataLoader,
     cfg,
     device: torch.device,
     out_dir: Path,
-    n_params: int,
 ) -> None:
-    """Compute final metrics and write eval_metrics.json."""
+    """Compute all metrics and write eval_metrics.json."""
     print("[evaluate] computing final metrics …")
 
-    final_recon, final_kl, final_total = _compute_final_val_losses(
-        model, val_loader, device, cfg.beta
-    )
+    n_params_g = sum(p.numel() for p in G.parameters())
+    n_params_d = sum(p.numel() for p in D.parameters())
+
+    metrics = _compute_metrics_pass(G, val_loader, device, cfg)
 
     summary: dict = {
-        "exp_name":      cfg.exp_name,
-        "n_params":      n_params,
-        "beta":          cfg.beta,
+        "exp_name":    cfg.exp_name,
         "base_channels": cfg.base_channels,
-        "latent_dim":    cfg.latent_dim,
-        "image_size":    cfg.image_size,
-        "final_val_recon": round(final_recon, 4),
-        "final_val_kl":    round(final_kl,    4),
-        "final_val_total": round(final_total,  4),
-        "fid": None,
+        "bottleneck_dim": cfg.bottleneck_dim,
+        "n_params_g":  n_params_g,
+        "n_params_d":  n_params_d,
+        "lambda_rec":  cfg.lambda_rec,
+        "lambda_adv":  cfg.lambda_adv,
+        "val_l1":      round(metrics["val_l1"], 6),
+        "psnr_db":     round(metrics["psnr"], 4) if metrics["psnr"] != float("inf") else None,
+        "ssim":        round(metrics["ssim"], 6) if metrics["ssim"] is not None else None,
+        "fid":         None,
     }
 
     if cfg.compute_fid:
-        summary["fid"] = _try_compute_fid(model, val_loader, cfg, device)
+        summary["fid"] = _try_fid(G, val_loader, device, cfg)
 
     out_path = out_dir / "eval_metrics.json"
     with open(out_path, "w") as f:
@@ -299,10 +325,9 @@ def _write_eval_metrics(
 
     print(f"  → {out_path}")
     print(
-        f"  n_params={n_params:,}  "
-        f"val_total={final_total:.2f}  "
-        f"val_recon={final_recon:.2f}  "
-        f"val_kl={final_kl:.2f}"
+        f"  G params={n_params_g:,}  D params={n_params_d:,}  "
+        f"val_l1={summary['val_l1']:.4f}  "
+        f"PSNR={summary['psnr_db']} dB  SSIM={summary['ssim']}"
     )
 
 
@@ -320,7 +345,7 @@ def main(cfg=None) -> None:
     if cfg is None:
         cfg = load_config()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path("outputs") / cfg.exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -334,23 +359,28 @@ def main(cfg=None) -> None:
     if not ckpt_path.exists():
         raise FileNotFoundError(
             f"Checkpoint not found: {ckpt_path}\n"
-            "Train first: python -m src.train --config <yaml>"
+            "Train first:  python -m src.train --config <yaml>"
         )
 
-    model = build_model(cfg).to(device)
-    load_checkpoint(ckpt_path, model)
-    model.eval()
+    # Load generator from checkpoint; build discriminator for param count.
+    G = build_generator(cfg).to(device)
+    D = build_discriminator(cfg).to(device)
 
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"[evaluate] loaded best.pt  ({n_params:,} parameters)\n")
+    # load_checkpoint restores G; D is optional (weights not needed for eval,
+    # but we pass it so param counts come from the same architecture).
+    load_checkpoint(ckpt_path, G, discriminator=D)
+    G.eval()
+    D.eval()
+
+    n_params_g = sum(p.numel() for p in G.parameters())
+    n_params_d = sum(p.numel() for p in D.parameters())
+    print(f"[evaluate] G params: {n_params_g:,}  D params: {n_params_d:,}\n")
 
     _, val_loader = get_dataloaders(cfg)
 
-    _generate_samples(model, cfg, device, out_dir)
-    _generate_reconstructions(model, val_loader, cfg, device, out_dir)
-    _generate_interpolations(model, val_loader, cfg, device, out_dir)
+    _visualize_inpainting(G, val_loader, cfg, device, out_dir)
     _plot_loss_curves(out_dir)
-    _write_eval_metrics(model, val_loader, cfg, device, out_dir, n_params)
+    _write_eval_metrics(G, D, val_loader, cfg, device, out_dir)
 
     print(f"\n[evaluate] Done.  All outputs in {out_dir}\n")
 
