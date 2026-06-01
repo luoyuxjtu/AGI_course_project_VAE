@@ -13,8 +13,11 @@ GPU_LITE=2
 # Each experiment is fully independent (separate outputs/, separate config),
 # so running them concurrently on different GPUs is safe.
 #
-# Stdout+stderr are tee'd to outputs/<exp>/train.log for live monitoring:
+# All experiment output goes to log files only — no progress bars in this
+# terminal.  Monitor in another terminal with:
 #   tail -f outputs/baseline/train.log
+#   tail -f outputs/recon_only/train.log
+#   tail -f outputs/lite/train.log
 #
 # Interrupted experiments resume automatically from their last checkpoint
 # when this script is re-run.
@@ -32,28 +35,32 @@ echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "================================================================"
 echo ""
 
-# Launch each experiment on its assigned GPU and capture the PID.
+# Launch each experiment — stdout+stderr go to the log file only.
+# Using plain redirection (not tee) so:
+#   1. No output reaches this terminal — no interleaved progress bars.
+#   2. $! captures the python PID directly; wait gives python's exit code.
+#      (With `cmd | tee file &`, $! would be tee's PID and a python crash
+#       would go undetected because tee always exits 0.)
 CUDA_VISIBLE_DEVICES=$GPU_BASELINE \
     python -m src.train --config configs/baseline.yaml \
-    2>&1 | tee outputs/baseline/train.log &
+    > outputs/baseline/train.log 2>&1 &
 PID_BASELINE=$!
 
 CUDA_VISIBLE_DEVICES=$GPU_RECON_ONLY \
     python -m src.train --config configs/recon_only.yaml \
-    2>&1 | tee outputs/recon_only/train.log &
+    > outputs/recon_only/train.log 2>&1 &
 PID_RECON_ONLY=$!
 
 CUDA_VISIBLE_DEVICES=$GPU_LITE \
     python -m src.train --config configs/lite.yaml \
-    2>&1 | tee outputs/lite/train.log &
+    > outputs/lite/train.log 2>&1 &
 PID_LITE=$!
 
-echo "  [GPU $GPU_BASELINE]     baseline   PID=$PID_BASELINE    → outputs/baseline/train.log"
-echo "  [GPU $GPU_RECON_ONLY]     recon_only PID=$PID_RECON_ONLY  → outputs/recon_only/train.log"
-echo "  [GPU $GPU_LITE]     lite       PID=$PID_LITE       → outputs/lite/train.log"
+echo "  [GPU $GPU_BASELINE]   baseline    PID=$PID_BASELINE   → outputs/baseline/train.log"
+echo "  [GPU $GPU_RECON_ONLY]   recon_only  PID=$PID_RECON_ONLY → outputs/recon_only/train.log"
+echo "  [GPU $GPU_LITE]   lite        PID=$PID_LITE      → outputs/lite/train.log"
 echo ""
 echo "Waiting for all experiments to finish ..."
-echo "(run  tail -f outputs/<exp>/train.log  in another terminal to monitor)"
 echo ""
 
 # Wait for each experiment and report pass/fail individually.
